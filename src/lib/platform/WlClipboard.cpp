@@ -10,13 +10,11 @@
 
 #include <chrono>
 #include <common/Settings.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <spawn.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#include <functional>
+#include <string_view>
 
 #include <QDateTime>
+#include <QDeadlineTimer>
 #include <QProcess>
 #include <QStandardPaths>
 
@@ -30,38 +28,34 @@ inline static const auto s_listTypes = QStringLiteral("--list-types");
 inline static const auto s_isPrimary = QStringLiteral("--primary");
 inline static const auto s_noNewLine = QStringLiteral("-n");
 inline static const auto s_readType = QStringLiteral("-t%1");
+inline static const auto s_writeType = QStringLiteral("--type");
+inline static const auto s_clear = QStringLiteral("--clear");
 
 // MIME types for different clipboard formats
 inline static const auto s_mimeTypeText = QStringLiteral("text/plain;charset=utf-8");
+inline static const auto s_mimeTypeTextPlain = QStringLiteral("text/plain");
 inline static const auto s_mimeTypeHtml = QStringLiteral("text/html");
 inline static const auto s_mimeTypeBmp = QStringLiteral("image/bmp");
 
-// Additional HTML MIME type variants
-const char *const s_mimeTypeHtmlUtf8 = "text/html;charset=UTF-8";
-const char *const s_mimeTypeHtmlWindows = "HTML Format";
-
-// Command timeout (milliseconds)
+// Timings (milliseconds)
 const int kCacheValidityMs = 100;
 const int kMonitorIntervalMs = 1000;
-const int kMaxConsecutiveErrors = 5;
+const int kMonitorStepMs = 50;
+const int kCommandTimeoutMs = 2000;
+const int kReadTimeoutMs = 5000;
+
+// The type list is short, this only guards against a misbehaving owner
+const std::size_t kMaxTypeListBytes = 64 * 1024;
 } // namespace
 
 WlClipboard::WlClipboard(ClipboardID id) : m_id(id), m_useClipboard(id == kClipboardClipboard)
 {
-  // Initialize cached data
-  for (int i = 0; i < static_cast<int>(Format::TotalFormats); ++i) {
-    m_cachedAvailable[i] = false;
-  }
+  // nothing to do
 }
 
 WlClipboard::~WlClipboard()
 {
   stopMonitoring();
-  for (auto &cmd : m_runningWlCopies) {
-    cmd->close();
-    cmd->waitForFinished(100);
-  }
-  m_runningWlCopies.clear();
 }
 
 ClipboardID WlClipboard::getID() const
@@ -104,9 +98,46 @@ void WlClipboard::stopMonitoring()
   m_monitorThread.reset();
 }
 
+void WlClipboard::checkForChanges()
+{
+  std::scoped_lock<std::mutex> lock(m_changeMutex);
+
+  const auto fingerprint = readFingerprint();
+  if (!fingerprint || fingerprint == m_lastFingerprint) {
+    return;
+  }
+  m_lastFingerprint = fingerprint;
+
+  // Back to the content we published ourselves, nothing new to report
+  if (fingerprint == m_ownFingerprint) {
+    return;
+  }
+  m_ownFingerprint.reset();
+  m_hasChanged = true;
+
+  std::scoped_lock<std::mutex> cacheLock(m_cacheMutex);
+  invalidateCache();
+}
+
 bool WlClipboard::hasChanged() const
 {
   return m_hasChanged.load();
+}
+
+bool WlClipboard::takeChanged()
+{
+  if (!m_hasChanged.exchange(false)) {
+    return false;
+  }
+
+  std::scoped_lock<std::mutex> lock(m_cacheMutex);
+  invalidateCache();
+  return true;
+}
+
+void WlClipboard::setMaximumSize(std::size_t bytes)
+{
+  m_maximumSize = bytes;
 }
 
 bool WlClipboard::empty()
@@ -114,30 +145,13 @@ bool WlClipboard::empty()
   if (!m_open) {
     return false;
   }
-  auto cmd = new QProcess(this);
-  cmd->setProgram(s_copyApp);
-  m_runningWlCopies.append(cmd);
-  connect(cmd, &QProcess::finished, this, [this, cmd] {
-    m_runningWlCopies.removeAll(cmd);
-    cmd->deleteLater();
-  });
 
-  QStringList args = {s_noNewLine, ""};
-  if (!m_useClipboard)
-    args.prepend(s_isPrimary);
-
-  cmd->setArguments(args);
-  cmd->start();
-  bool success = cmd->waitForStarted(100);
-
-  if (success) {
-    // Update ownership and cache only if command succeeded
-    std::scoped_lock<std::mutex> lock(m_cacheMutex);
-    updateOwnership(true);
-    invalidateCache();
+  m_dirty = true;
+  for (int i = 0; i < static_cast<int>(Format::TotalFormats); ++i) {
+    m_pendingData[i].clear();
+    m_pendingAvailable[i] = false;
   }
-
-  return success;
+  return true;
 }
 
 void WlClipboard::add(Format format, const std::string &data)
@@ -150,33 +164,14 @@ void WlClipboard::add(Format format, const std::string &data)
     return;
   }
 
-  auto mimeType = formatToMimeType(format);
-  if (mimeType.isEmpty()) {
+  if (formatToMimeType(format).isEmpty()) {
     LOG_WARN("unsupported clipboard format: %d", format);
     return;
   }
 
-  auto cmd = new QProcess(this);
-  cmd->setProgram(s_copyApp);
-
-  m_runningWlCopies.append(cmd);
-  connect(cmd, &QProcess::finished, this, [this, cmd] {
-    m_runningWlCopies.removeAll(cmd);
-    cmd->deleteLater();
-  });
-
-  QStringList args = {s_noNewLine, s_readType.arg(mimeType), QString::fromStdString(data)};
-  if (!m_useClipboard)
-    args.prepend(s_isPrimary);
-
-  cmd->setArguments(args);
-  cmd->start();
-
-  if (cmd->waitForStarted(100)) {
-    std::scoped_lock<std::mutex> lock(m_cacheMutex);
-    updateOwnership(true);
-    invalidateCache();
-  }
+  m_dirty = true;
+  m_pendingData[static_cast<int>(format)] = data;
+  m_pendingAvailable[static_cast<int>(format)] = true;
 }
 
 bool WlClipboard::open(Time time) const
@@ -188,6 +183,7 @@ bool WlClipboard::open(Time time) const
 
   m_open = true;
   m_time = time;
+  m_dirty = false;
 
   return true;
 }
@@ -201,7 +197,13 @@ void WlClipboard::close() const
   LOG_DEBUG("close clipboard");
 
   m_open = false;
-  const_cast<WlClipboard *>(this)->invalidateCache();
+  if (m_dirty) {
+    m_dirty = false;
+    publish();
+  }
+
+  std::scoped_lock<std::mutex> lock(m_cacheMutex);
+  invalidateCache();
 }
 
 IClipboard::Time WlClipboard::getTime() const
@@ -213,6 +215,11 @@ bool WlClipboard::has(Format format) const
 {
   if (!m_open) {
     return false;
+  }
+
+  // Answer from our own unpublished writes
+  if (m_dirty) {
+    return m_pendingAvailable[static_cast<int>(format)];
   }
 
   std::scoped_lock<std::mutex> lock(m_cacheMutex);
@@ -239,8 +246,8 @@ bool WlClipboard::has(Format format) const
       m_cachedAvailable[i] = false;
       if (!mimeType.isEmpty()) {
         for (const auto &available : availableTypes) {
-          if (available == mimeType || (currentFormat == Text && available == QStringLiteral("text/plain")) ||
-              (currentFormat == HTML && available.startsWith(QStringLiteral("text/html")))) {
+          if (available == mimeType || (currentFormat == Text && available == s_mimeTypeTextPlain) ||
+              (currentFormat == HTML && available.startsWith(s_mimeTypeHtml))) {
             m_cachedAvailable[i] = true;
             break;
           }
@@ -261,6 +268,11 @@ std::string WlClipboard::get(Format format) const
     return std::string();
   }
 
+  // Answer from our own unpublished writes
+  if (m_dirty) {
+    return m_pendingAvailable[static_cast<int>(format)] ? m_pendingData[static_cast<int>(format)] : std::string();
+  }
+
   std::scoped_lock<std::mutex> lock(m_cacheMutex);
 
   // Return cached data if available and valid
@@ -273,18 +285,21 @@ std::string WlClipboard::get(Format format) const
     return std::string();
   }
 
-  QProcess cmd;
-  cmd.setProgram(s_pasteApp);
-
   QStringList args = {s_noNewLine, s_readType.arg(mimeType)};
   if (!m_useClipboard)
     args.append(s_isPrimary);
 
-  cmd.setArguments(args);
-  cmd.start();
-  cmd.waitForFinished();
+  QByteArray output;
+  bool oversized = false;
+  const auto maxBytes = m_maximumSize.load();
+  if (!readPaste(args, maxBytes, output, oversized)) {
+    if (oversized) {
+      LOG_WARN("not reading clipboard data, exceeds limit: %zu KB", maxBytes / 1024);
+    }
+    output.clear();
+  }
 
-  auto data = cmd.readAll().toStdString();
+  auto data = output.toStdString();
 
   // Update cache
   m_cachedData[static_cast<int>(format)] = data;
@@ -310,74 +325,155 @@ QString WlClipboard::formatToMimeType(Format format) const
   }
 }
 
-IClipboard::Format WlClipboard::mimeTypeToFormat(const QString &mimeType) const
-{
-  using enum IClipboard::Format;
-  if (mimeType == s_mimeTypeText || mimeType == QStringLiteral("text/plain")) {
-    return Text;
-  }
-  if (mimeType == s_mimeTypeHtml || mimeType == s_mimeTypeHtmlUtf8 || mimeType == s_mimeTypeHtmlWindows ||
-      mimeType.contains("text/html")) {
-    return HTML;
-  }
-  if (mimeType == s_mimeTypeBmp) {
-    return Bitmap;
-  }
-  return Text; // Default fallback
-}
-
 QStringList WlClipboard::getAvailableMimeTypes() const
 {
-  QProcess cmd;
-  cmd.setProgram(s_pasteApp);
-
   QStringList args = {s_listTypes};
   if (!m_useClipboard)
     args.append(s_isPrimary);
 
-  cmd.setArguments(args);
-  cmd.start();
-  cmd.waitForFinished();
+  // wl-paste fails when nothing is copied, which is an empty type list
+  QByteArray output;
+  bool oversized = false;
+  if (!readPaste(args, kMaxTypeListBytes, output, oversized)) {
+    return {};
+  }
 
   const static QChar newLine = QLatin1Char('\n');
-  return QString::fromLocal8Bit(cmd.readAll()).split(newLine);
+  return QString::fromLocal8Bit(output).split(newLine, Qt::SkipEmptyParts);
+}
+
+bool WlClipboard::readPaste(const QStringList &args, std::size_t maxBytes, QByteArray &output, bool &oversized) const
+{
+  output.clear();
+  oversized = false;
+
+  QProcess cmd;
+  cmd.setProgram(s_pasteApp);
+  cmd.setArguments(args);
+  cmd.start(QIODevice::ReadOnly);
+  if (!cmd.waitForStarted(kCommandTimeoutMs)) {
+    LOG_WARN("failed to start wl-paste: %s", qPrintable(cmd.errorString()));
+    return false;
+  }
+
+  // Read as the data arrives so an oversized selection is abandoned early
+  QDeadlineTimer deadline(kReadTimeoutMs);
+  for (;;) {
+    output.append(cmd.readAllStandardOutput());
+    if (static_cast<std::size_t>(output.size()) > maxBytes) {
+      oversized = true;
+      cmd.kill();
+      cmd.waitForFinished();
+      return false;
+    }
+    if (cmd.state() == QProcess::NotRunning) {
+      break;
+    }
+    if (deadline.hasExpired()) {
+      LOG_WARN("wl-paste did not finish in time, killing it");
+      cmd.kill();
+      cmd.waitForFinished();
+      return false;
+    }
+    cmd.waitForReadyRead(static_cast<int>(deadline.remainingTime()));
+  }
+
+  return cmd.exitStatus() == QProcess::NormalExit && cmd.exitCode() == 0;
+}
+
+void WlClipboard::publish() const
+{
+  using enum IClipboard::Format;
+
+  // wl-copy serves one type per call, prefer text when there is a choice
+  QStringList args = {s_clear};
+  const std::string *payload = nullptr;
+  for (const auto format : {Text, Bitmap}) {
+    if (m_pendingAvailable[static_cast<int>(format)]) {
+      args = {s_writeType, formatToMimeType(format)};
+      payload = &m_pendingData[static_cast<int>(format)];
+      break;
+    }
+  }
+  if (!m_useClipboard)
+    args.prepend(s_isPrimary);
+
+  std::scoped_lock<std::mutex> lock(m_changeMutex);
+
+  // The payload goes through stdin: no size limit, binary safe and never
+  // mistaken for an option
+  QProcess cmd;
+  cmd.setProgram(s_copyApp);
+  cmd.setArguments(args);
+  cmd.start();
+  if (!cmd.waitForStarted(kCommandTimeoutMs)) {
+    LOG_WARN("failed to start wl-copy: %s", qPrintable(cmd.errorString()));
+    return;
+  }
+  if (payload) {
+    cmd.write(payload->data(), static_cast<qint64>(payload->size()));
+    while (cmd.bytesToWrite() > 0 && cmd.waitForBytesWritten(kCommandTimeoutMs)) {
+      // keep writing
+    }
+  }
+  cmd.closeWriteChannel();
+
+  // wl-copy exits once the compositor has accepted the new selection,
+  // a forked child keeps serving it
+  if (!cmd.waitForFinished(kCommandTimeoutMs)) {
+    LOG_WARN("wl-copy did not finish in time, killing it");
+    cmd.kill();
+    cmd.waitForFinished();
+    return;
+  }
+  if (cmd.exitStatus() != QProcess::NormalExit || cmd.exitCode() != 0) {
+    LOG_WARN("wl-copy failed: %s", cmd.readAllStandardError().trimmed().constData());
+    return;
+  }
+
+  // Remember our own content so it is not reported as a local change
+  m_ownFingerprint = readFingerprint();
+  m_lastFingerprint = m_ownFingerprint;
+
+  std::scoped_lock<std::mutex> cacheLock(m_cacheMutex);
+  invalidateCache();
+}
+
+std::optional<std::size_t> WlClipboard::readFingerprint() const
+{
+  const auto types = getAvailableMimeTypes();
+
+  // Hash the text itself so a new copy with the same types is still seen,
+  // and so a re-offer of the same text by another owner is not
+  for (const auto &textType : {s_mimeTypeText, s_mimeTypeTextPlain}) {
+    if (!types.contains(textType)) {
+      continue;
+    }
+
+    QStringList args = {s_noNewLine, s_readType.arg(textType)};
+    if (!m_useClipboard)
+      args.append(s_isPrimary);
+
+    // Oversized text is never sent, its first bytes are enough to tell copies apart
+    QByteArray data;
+    bool oversized = false;
+    if (!readPaste(args, m_maximumSize.load(), data, oversized) && !oversized) {
+      return std::nullopt;
+    }
+    return std::hash<std::string_view>{}(std::string_view(data.constData(), data.size()));
+  }
+
+  return std::hash<std::string>{}(types.join(QLatin1Char('\n')).prepend(QStringLiteral("types:")).toStdString());
 }
 
 void WlClipboard::monitorClipboard()
 {
-  QStringList lastTypes;
-  int consecutiveErrors = 0;
-
   while (!m_stopMonitoring) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(kMonitorIntervalMs));
-    try {
-      // Check if clipboard content has changed by comparing available types
-      const auto currentTypes = getAvailableMimeTypes();
-
-      // Reset error counter on successful operation
-      consecutiveErrors = 0;
-
-      if (currentTypes != lastTypes) {
-        m_hasChanged = true;
-        lastTypes = currentTypes;
-
-        // Clear cache when clipboard changes
-        std::scoped_lock<std::mutex> lock(m_cacheMutex);
-        invalidateCache();
-        updateOwnership(false);
-      }
-    } catch (const std::exception &e) {
-      LOG_WARN("clipboard monitoring error: %s", e.what());
-      if (++consecutiveErrors >= kMaxConsecutiveErrors) {
-        LOG_ERR("too many consecutive errors in clipboard monitoring, stopping");
-        break;
-      }
-    } catch (...) {
-      LOG_WARN("clipboard monitoring unknown error");
-      if (++consecutiveErrors >= kMaxConsecutiveErrors) {
-        LOG_ERR("too many consecutive errors in clipboard monitoring, stopping");
-        break;
-      }
+    for (int waited = 0; waited < kMonitorIntervalMs && !m_stopMonitoring; waited += kMonitorStepMs) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(kMonitorStepMs));
+    }
+    if (!m_stopMonitoring) {
+      checkForChanges();
     }
   }
 }
@@ -385,11 +481,6 @@ void WlClipboard::monitorClipboard()
 IClipboard::Time WlClipboard::getCurrentTime() const
 {
   return static_cast<Time>(QDateTime::currentMSecsSinceEpoch());
-}
-
-bool WlClipboard::isOwned() const
-{
-  return m_owned;
 }
 
 void WlClipboard::resetChanged()
@@ -401,12 +492,7 @@ void WlClipboard::resetChanged()
   invalidateCache();
 }
 
-void WlClipboard::updateOwnership(bool owned)
-{
-  m_owned = owned;
-}
-
-void WlClipboard::invalidateCache()
+void WlClipboard::invalidateCache() const
 {
   m_cached = false;
   m_cachedTime = 0;

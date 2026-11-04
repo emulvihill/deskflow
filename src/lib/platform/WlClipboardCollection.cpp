@@ -93,6 +93,37 @@ void WlClipboardCollection::resetChanged() const
   }
 }
 
+void WlClipboardCollection::checkForChanges() const
+{
+  if (!m_available) {
+    return;
+  }
+
+  for (const auto &clipboard : m_clipboards) {
+    if (clipboard) {
+      clipboard->checkForChanges();
+    }
+  }
+}
+
+bool WlClipboardCollection::takeChanged(ClipboardID id) const
+{
+  if (!m_available || id >= m_clipboards.size() || !m_clipboards[id]) {
+    return false;
+  }
+
+  return m_clipboards[id]->takeChanged();
+}
+
+void WlClipboardCollection::setMaximumSize(std::size_t bytes) const
+{
+  for (const auto &clipboard : m_clipboards) {
+    if (clipboard) {
+      clipboard->setMaximumSize(bytes);
+    }
+  }
+}
+
 void WlClipboardCollection::initialize()
 {
   if (!WlClipboard::isEnabled()) {

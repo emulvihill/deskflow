@@ -50,6 +50,11 @@ private Q_SLOTS:
   void closeWithoutOpen();
   void addWithoutOpen();
   void getWithoutOpen();
+  void contentChangeDetected();
+  void ownWriteNotReported();
+  void largePayload();
+  void optionLikePayload();
+  void sizeLimit();
 #endif
 
 private:
@@ -63,6 +68,8 @@ private:
 
   // clang-format off
   // Helper methods for robust testing
+  void writeText(WlClipboard &clipboard, const std::string &text);
+  std::string readText(ClipboardID id, std::size_t maxBytes = SIZE_MAX);
   bool waitForClipboardCondition(WlClipboard &clipboard, std::function<bool()> condition, int timeoutMs = 2000);
   bool waitForClipboardEmpty(WlClipboard &clipboard, const std::string &previousContent, int timeoutMs = 2000);
   bool waitForClipboardContent(WlClipboard &clipboard, IClipboard::Format format, const std::string &expectedContent, int timeoutMs = 2000);

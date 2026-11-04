@@ -10,20 +10,27 @@
 #include "deskflow/IClipboard.h"
 
 #include <atomic>
-#include <fcntl.h>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
+#include <QByteArray>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
-class QProcess;
 //! Wayland clipboard implementation using wl-copy/wl-paste
 /*!
 This class implements clipboard functionality for Wayland environments
 by using the wl-clipboard utilities (wl-copy and wl-paste).
+
+Writes made between open() and close() are buffered and published with a
+single wl-copy call on close(). Changes made by other applications are
+detected by fingerprinting the clipboard content; content this object
+published itself is not reported as a change.
 */
 class WlClipboard : public QObject, public IClipboard
 {
@@ -52,11 +59,20 @@ public:
   //! Stop monitoring clipboard changes
   void stopMonitoring();
 
+  //! Read the clipboard now and record whether another application changed it
+  void checkForChanges();
+
   //! Check if clipboard has changed
   bool hasChanged() const;
 
+  //! Return and clear the changed flag
+  bool takeChanged();
+
   //! Reset the changed flag and clear cache
   void resetChanged();
+
+  //! Limit in bytes for reading clipboard data
+  void setMaximumSize(std::size_t bytes);
 
   // IClipboard overrides
   bool empty() override;
@@ -71,11 +87,17 @@ private:
   //! Convert IClipboard format to MIME type
   QString formatToMimeType(Format format) const;
 
-  //! Convert MIME type to IClipboard format
-  Format mimeTypeToFormat(const QString &mimeType) const;
-
   //! Get available MIME types from clipboard
   QStringList getAvailableMimeTypes() const;
+
+  //! Run wl-paste and read at most maxBytes of its output
+  bool readPaste(const QStringList &args, std::size_t maxBytes, QByteArray &output, bool &oversized) const;
+
+  //! Write the buffered data to the clipboard with one wl-copy call
+  void publish() const;
+
+  //! Fingerprint of the current clipboard content, empty if it could not be read
+  std::optional<std::size_t> readFingerprint() const;
 
   //! Monitor clipboard changes in background thread
   void monitorClipboard();
@@ -83,28 +105,32 @@ private:
   //! Get current clipboard serial/timestamp
   Time getCurrentTime() const;
 
-  //! Check if we own the clipboard
-  bool isOwned() const;
-
-  //! Update our ownership status
-  void updateOwnership(bool owned);
-
-  //! Invalidate cached clipboard data
-  void invalidateCache();
+  //! Invalidate cached clipboard data, m_cacheMutex must be held
+  void invalidateCache() const;
 
 private:
   ClipboardID m_id;
   mutable bool m_open = false;
   mutable Time m_time = 0;
-  mutable Time m_cachedTime = 0;
-  mutable bool m_owned = false;
-  mutable std::atomic<bool> m_hasChanged = false;
+  std::atomic<std::size_t> m_maximumSize = SIZE_MAX;
+  std::atomic<bool> m_hasChanged = false;
 
-  // Cached clipboard data
+  // Data written between open() and close(), published on close()
+  mutable bool m_dirty = false;
+  mutable std::string m_pendingData[static_cast<int>(Format::TotalFormats)];
+  mutable bool m_pendingAvailable[static_cast<int>(Format::TotalFormats)] = {};
+
+  // Cached clipboard data, guarded by m_cacheMutex
   mutable std::mutex m_cacheMutex;
   mutable bool m_cached = false;
+  mutable Time m_cachedTime = 0;
   mutable std::string m_cachedData[static_cast<int>(Format::TotalFormats)];
-  mutable bool m_cachedAvailable[static_cast<int>(Format::TotalFormats)];
+  mutable bool m_cachedAvailable[static_cast<int>(Format::TotalFormats)] = {};
+
+  // Change detection, guarded by m_changeMutex (taken before m_cacheMutex)
+  mutable std::mutex m_changeMutex;
+  mutable std::optional<std::size_t> m_lastFingerprint;
+  mutable std::optional<std::size_t> m_ownFingerprint;
 
   // Background monitoring
   std::unique_ptr<std::thread> m_monitorThread;
@@ -113,7 +139,4 @@ private:
 
   // Clipboard selection type (true = clipboard, false = primary)
   bool m_useClipboard;
-
-  // Hold a ref to running wl-copy processes
-  QList<QProcess *> m_runningWlCopies;
 };

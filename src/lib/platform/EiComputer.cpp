@@ -545,13 +545,14 @@ bool EiComputer::setClipboard(ClipboardID id, const IClipboard *clipboard)
 void EiComputer::checkClipboards()
 {
   // wl-clipboard polls for changes in the background, report them on leave.
+  // Check once more now so a copy made just before leaving is not missed.
   // ClipboardGrabbed (not ClipboardChanged) so the client takes ownership too.
   if (m_wlClipboard) {
-    if (m_wlClipboard->hasChanged()) {
-      for (ClipboardID id = 0; id < kClipboardEnd; ++id) {
+    m_wlClipboard->checkForChanges();
+    for (ClipboardID id = 0; id < kClipboardEnd; ++id) {
+      if (m_wlClipboard->takeChanged(id)) {
         sendClipboardEvent(EventTypes::ClipboardGrabbed, id);
       }
-      m_wlClipboard->resetChanged();
     }
     return;
   }
@@ -591,6 +592,9 @@ void EiComputer::setOptions(const OptionsList &options)
         break;
       m_maximumClipboardSize = *it;
       LOG_DEBUG("computer received clipboard size limit: %zu KB", m_maximumClipboardSize);
+      if (m_wlClipboard) {
+        m_wlClipboard->setMaximumSize(m_maximumClipboardSize * 1024);
+      }
     }
   }
 }

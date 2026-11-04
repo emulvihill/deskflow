@@ -45,6 +45,15 @@ public:
   //! Reset change detection
   void resetChanged() const;
 
+  //! Read all clipboards now to catch changes since the last poll
+  void checkForChanges() const;
+
+  //! Return and clear the changed flag of one clipboard
+  bool takeChanged(ClipboardID id) const;
+
+  //! Limit in bytes for reading clipboard data
+  void setMaximumSize(std::size_t bytes) const;
+
 private:
   //! Initialize clipboard backends
   void initialize();

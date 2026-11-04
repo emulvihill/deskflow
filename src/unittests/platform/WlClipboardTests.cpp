@@ -247,16 +247,13 @@ void WlClipboardTests::monitoring()
     externalClipboard.close();
   }
 
-  // Wait for monitoring thread to detect change
+  // Wait for monitoring thread to detect change, it polls once a second
   auto changeDetected = [&clipboard]() { return clipboard.hasChanged(); };
-  waitForClipboardCondition(clipboard, changeDetected, 1000);
+  QVERIFY(waitForClipboardCondition(clipboard, changeDetected, 3000));
 
   // Stop monitoring
   clipboard.stopMonitoring();
   clipboard.close();
-
-  // Note: Change detection might not work reliably in all test environments
-  // This test mainly verifies that monitoring doesn't crash
 }
 
 void WlClipboardTests::primaryClipboard()
@@ -328,6 +325,103 @@ void WlClipboardTests::getWithoutOpen()
   // Should still be able to open and use normally
   QVERIFY(clipboard.open(0));
   clipboard.close();
+}
+
+void WlClipboardTests::contentChangeDetected()
+{
+  WlClipboard writer(kClipboardClipboard);
+  WlClipboard observer(kClipboardClipboard);
+
+  writeText(writer, m_testString);
+  observer.checkForChanges();
+  observer.resetChanged();
+
+  // Same MIME types, different text: must still count as a change
+  writeText(writer, m_testString2);
+  observer.checkForChanges();
+  QVERIFY(observer.hasChanged());
+  QVERIFY(observer.takeChanged());
+  QVERIFY(!observer.hasChanged());
+
+  // Nothing new since the last check
+  observer.checkForChanges();
+  QVERIFY(!observer.hasChanged());
+}
+
+void WlClipboardTests::ownWriteNotReported()
+{
+  WlClipboard clipboard(kClipboardClipboard);
+  WlClipboard other(kClipboardClipboard);
+
+  writeText(other, m_testString);
+  clipboard.checkForChanges();
+  clipboard.resetChanged();
+
+  // Data we publish ourselves (e.g. received from a remote computer) is not a local change
+  writeText(clipboard, m_testString2);
+  clipboard.checkForChanges();
+  QVERIFY(!clipboard.hasChanged());
+
+  // A later copy by another application is
+  writeText(other, m_testString);
+  clipboard.checkForChanges();
+  QVERIFY(clipboard.hasChanged());
+}
+
+void WlClipboardTests::largePayload()
+{
+  // Larger than the 128 KiB limit for a single command line argument
+  std::string payload;
+  for (int i = 0; payload.size() < 200 * 1024; ++i) {
+    payload += "line " + std::to_string(i) + "\n";
+  }
+
+  WlClipboard clipboard(kClipboardClipboard);
+  writeText(clipboard, payload);
+
+  // Published by the time close() returns
+  QCOMPARE(readText(kClipboardClipboard), payload);
+}
+
+void WlClipboardTests::optionLikePayload()
+{
+  const std::string payload = "--clear\n";
+
+  WlClipboard clipboard(kClipboardClipboard);
+  writeText(clipboard, payload);
+
+  QCOMPARE(readText(kClipboardClipboard), payload);
+}
+
+void WlClipboardTests::sizeLimit()
+{
+  const std::string payload(4096, 'x');
+
+  WlClipboard clipboard(kClipboardClipboard);
+  writeText(clipboard, payload);
+
+  QCOMPARE(readText(kClipboardClipboard, 1024), std::string());
+  QCOMPARE(readText(kClipboardClipboard, 8192), payload);
+}
+
+void WlClipboardTests::writeText(WlClipboard &clipboard, const std::string &text)
+{
+  QVERIFY(clipboard.open(0));
+  QVERIFY(clipboard.empty());
+  clipboard.add(IClipboard::Format::Text, text);
+  clipboard.close();
+}
+
+std::string WlClipboardTests::readText(ClipboardID id, std::size_t maxBytes)
+{
+  WlClipboard clipboard(id);
+  clipboard.setMaximumSize(maxBytes);
+  if (!clipboard.open(0)) {
+    return {};
+  }
+  auto text = clipboard.get(IClipboard::Format::Text);
+  clipboard.close();
+  return text;
 }
 
 bool WlClipboardTests::waitForClipboardCondition(WlClipboard &, std::function<bool()> condition, int timeoutMs)
