@@ -15,9 +15,11 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include <QByteArray>
+#include <QDeadlineTimer>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -62,6 +64,9 @@ public:
   //! Read the clipboard now and record whether another application changed it
   void checkForChanges();
 
+  //! As checkForChanges(), giving up at the deadline and keeping the previous result
+  void checkForChanges(const QDeadlineTimer &deadline);
+
   //! Check if clipboard has changed
   bool hasChanged() const;
 
@@ -87,17 +92,23 @@ private:
   //! Convert IClipboard format to MIME type
   QString formatToMimeType(Format format) const;
 
-  //! Get available MIME types from clipboard
-  QStringList getAvailableMimeTypes() const;
+  //! Get available MIME types from clipboard, empty if they could not be read
+  std::optional<QStringList> getAvailableMimeTypes(const QDeadlineTimer &deadline) const;
 
   //! Run wl-paste and read at most maxBytes of its output
-  bool readPaste(const QStringList &args, std::size_t maxBytes, QByteArray &output, bool &oversized) const;
+  bool readPaste(
+      const QStringList &args, std::size_t maxBytes, const QDeadlineTimer &deadline, QByteArray &output,
+      bool &oversized, bool *nothingCopied = nullptr
+  ) const;
 
   //! Write the buffered data to the clipboard with one wl-copy call
   void publish() const;
 
   //! Fingerprint of the current clipboard content, empty if it could not be read
-  std::optional<std::size_t> readFingerprint() const;
+  std::optional<std::size_t> readFingerprint(const QDeadlineTimer &deadline) const;
+
+  //! Fingerprint from the offered types, or from the text when there is text
+  static std::size_t fingerprintOf(const QStringList &types, const std::optional<std::string_view> &text);
 
   //! Monitor clipboard changes in background thread
   void monitorClipboard();
@@ -113,7 +124,7 @@ private:
   mutable bool m_open = false;
   mutable Time m_time = 0;
   std::atomic<std::size_t> m_maximumSize = SIZE_MAX;
-  std::atomic<bool> m_hasChanged = false;
+  mutable std::atomic<bool> m_hasChanged = false;
 
   // Data written between open() and close(), published on close()
   mutable bool m_dirty = false;
@@ -127,10 +138,14 @@ private:
   mutable std::string m_cachedData[static_cast<int>(Format::TotalFormats)];
   mutable bool m_cachedAvailable[static_cast<int>(Format::TotalFormats)] = {};
 
-  // Change detection, guarded by m_changeMutex (taken before m_cacheMutex)
+  // Change detection, guarded by m_changeMutex (taken before m_cacheMutex).
+  // The mutex is never held while a process runs; each check or publish takes
+  // a sequence number so a slow check cannot overwrite a newer state.
   mutable std::mutex m_changeMutex;
   mutable std::optional<std::size_t> m_lastFingerprint;
   mutable std::optional<std::size_t> m_ownFingerprint;
+  mutable std::uint64_t m_appliedSequence = 0;
+  mutable std::atomic<std::uint64_t> m_checkSequence = 0;
 
   // Background monitoring
   std::unique_ptr<std::thread> m_monitorThread;

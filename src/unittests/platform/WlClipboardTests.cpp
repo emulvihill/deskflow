@@ -368,6 +368,59 @@ void WlClipboardTests::ownWriteNotReported()
   QVERIFY(clipboard.hasChanged());
 }
 
+void WlClipboardTests::publishClearsPendingChange()
+{
+  WlClipboard clipboard(kClipboardClipboard);
+  WlClipboard other(kClipboardClipboard);
+
+  // A local copy has been detected but not reported yet
+  clipboard.checkForChanges();
+  writeText(other, m_testString);
+  clipboard.checkForChanges();
+  QVERIFY(clipboard.hasChanged());
+
+  // Remote data published on top replaces it, so there is nothing local to report
+  writeText(clipboard, m_testString2);
+  QVERIFY(!clipboard.hasChanged());
+  clipboard.checkForChanges();
+  QVERIFY(!clipboard.hasChanged());
+}
+
+void WlClipboardTests::expiredDeadlineKeepsState()
+{
+  WlClipboard clipboard(kClipboardClipboard);
+  WlClipboard other(kClipboardClipboard);
+
+  writeText(other, m_testString);
+  clipboard.checkForChanges();
+  clipboard.resetChanged();
+
+  // No time to read: the previous result stands
+  writeText(other, m_testString2);
+  clipboard.checkForChanges(QDeadlineTimer(0));
+  QVERIFY(!clipboard.hasChanged());
+
+  clipboard.checkForChanges();
+  QVERIFY(clipboard.hasChanged());
+}
+
+void WlClipboardTests::failedQueryIgnored()
+{
+  WlClipboard clipboard(kClipboardClipboard);
+  WlClipboard other(kClipboardClipboard);
+
+  writeText(other, m_testString);
+  clipboard.checkForChanges();
+  clipboard.resetChanged();
+
+  // wl-paste cannot connect, which must not look like an emptied clipboard
+  const auto display = qgetenv("WAYLAND_DISPLAY");
+  qputenv("WAYLAND_DISPLAY", "deskflow-no-such-display");
+  clipboard.checkForChanges();
+  qputenv("WAYLAND_DISPLAY", display);
+  QVERIFY(!clipboard.hasChanged());
+}
+
 void WlClipboardTests::largePayload()
 {
   // Larger than the 128 KiB limit for a single command line argument

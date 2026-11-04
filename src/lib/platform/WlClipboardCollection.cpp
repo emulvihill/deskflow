@@ -93,7 +93,7 @@ void WlClipboardCollection::resetChanged() const
   }
 }
 
-void WlClipboardCollection::checkForChanges() const
+void WlClipboardCollection::checkForChanges(const QDeadlineTimer &deadline) const
 {
   if (!m_available) {
     return;
@@ -101,7 +101,7 @@ void WlClipboardCollection::checkForChanges() const
 
   for (const auto &clipboard : m_clipboards) {
     if (clipboard) {
-      clipboard->checkForChanges();
+      clipboard->checkForChanges(deadline);
     }
   }
 }

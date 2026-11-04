@@ -52,6 +52,9 @@ private Q_SLOTS:
   void getWithoutOpen();
   void contentChangeDetected();
   void ownWriteNotReported();
+  void publishClearsPendingChange();
+  void expiredDeadlineKeepsState();
+  void failedQueryIgnored();
   void largePayload();
   void optionLikePayload();
   void sizeLimit();

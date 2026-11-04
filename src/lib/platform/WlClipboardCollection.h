@@ -10,6 +10,8 @@
 #include "deskflow/IClipboard.h"
 #include "platform/WlClipboard.h"
 
+#include <QDeadlineTimer>
+
 #include <memory>
 #include <vector>
 
@@ -45,8 +47,9 @@ public:
   //! Reset change detection
   void resetChanged() const;
 
-  //! Read all clipboards now to catch changes since the last poll
-  void checkForChanges() const;
+  //! Read all clipboards now to catch changes since the last poll,
+  //! keeping the previous result for any clipboard not read by the deadline
+  void checkForChanges(const QDeadlineTimer &deadline) const;
 
   //! Return and clear the changed flag of one clipboard
   bool takeChanged(ClipboardID id) const;

@@ -22,6 +22,8 @@
 #include "platform/PortalRemoteDesktop.h"
 #include "platform/WlClipboardCollection.h"
 
+#include <QDeadlineTimer>
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -545,10 +547,11 @@ bool EiComputer::setClipboard(ClipboardID id, const IClipboard *clipboard)
 void EiComputer::checkClipboards()
 {
   // wl-clipboard polls for changes in the background, report them on leave.
-  // Check once more now so a copy made just before leaving is not missed.
+  // Check once more now so a copy made just before leaving is not missed,
+  // within a short budget so leaving never waits on a slow clipboard owner.
   // ClipboardGrabbed (not ClipboardChanged) so the client takes ownership too.
   if (m_wlClipboard) {
-    m_wlClipboard->checkForChanges();
+    m_wlClipboard->checkForChanges(QDeadlineTimer(s_wlClipboardLeaveBudgetMs));
     for (ClipboardID id = 0; id < kClipboardEnd; ++id) {
       if (m_wlClipboard->takeChanged(id)) {
         sendClipboardEvent(EventTypes::ClipboardGrabbed, id);

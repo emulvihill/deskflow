@@ -163,6 +163,8 @@ private:
   // clipboard stuff
   EiClipboard *m_clipboard = nullptr;
   WlClipboardCollection *m_wlClipboard = nullptr;
+  // Time allowed for the wl-clipboard check on leave, after that the monitor's last result is used
+  static constexpr int s_wlClipboardLeaveBudgetMs = 300;
   size_t m_maximumClipboardSize = INT_MAX;
 
   std::vector<ei_device *> m_eiDevices;
