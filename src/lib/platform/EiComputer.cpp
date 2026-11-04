@@ -20,6 +20,7 @@
 #include "platform/EiKeyState.h"
 #include "platform/PortalInputCapture.h"
 #include "platform/PortalRemoteDesktop.h"
+#include "platform/WlClipboardCollection.h"
 
 #include <algorithm>
 #include <bit>
@@ -53,6 +54,16 @@ EiComputer::EiComputer(bool isPrimary, IEventQueue *events, bool usePortal)
   m_events->addHandler(EventTypes::System, m_events->getSystemTarget(), [this](const auto &e) {
     handleSystemEvent(e);
   });
+
+  // When enabled and installed, wl-clipboard replaces the portal clipboard.
+  // Set up before the portals so they can see which backend is in use.
+  m_wlClipboard = new WlClipboardCollection();
+  if (m_wlClipboard->isAvailable()) {
+    LOG_INFO("using wl-clipboard for clipboard sharing");
+  } else {
+    delete m_wlClipboard;
+    m_wlClipboard = nullptr;
+  }
 
   if (usePortal) {
     m_events->addHandler(EventTypes::EIConnected, getEventTarget(), [this](const auto &e) {
@@ -99,6 +110,7 @@ EiComputer::~EiComputer()
 
   delete m_keyState;
   delete m_clipboard;
+  delete m_wlClipboard;
 
 #ifdef HAVE_LIBPORTAL_SHORTCUTS
   delete m_portalGlobalShortcuts;
@@ -177,6 +189,14 @@ void *EiComputer::getEventTarget() const
 
 bool EiComputer::getClipboard(ClipboardID id, IClipboard *clipboard) const
 {
+  if (m_wlClipboard) {
+    const auto sourceClipboard = m_wlClipboard->getClipboard(id);
+    if (!sourceClipboard) {
+      return false;
+    }
+    return IClipboard::copy(clipboard, sourceClipboard);
+  }
+
   // If using portal input capture, get clipboard from there
   if (m_portalInputCapture) {
     const auto sourceClipboard = m_portalInputCapture->getClipboard(id);
@@ -395,11 +415,17 @@ void EiComputer::enable()
 {
   m_activated = true;
   updatePortalGlobalShortcuts();
+  if (m_wlClipboard) {
+    m_wlClipboard->startMonitoring();
+  }
 }
 
 void EiComputer::disable()
 {
   m_activated = false;
+  if (m_wlClipboard) {
+    m_wlClipboard->stopMonitoring();
+  }
 }
 
 void EiComputer::cancelIdleEmulationTimer() const
@@ -485,6 +511,14 @@ bool EiComputer::setClipboard(ClipboardID id, const IClipboard *clipboard)
     return false;
   }
 
+  if (m_wlClipboard) {
+    IClipboard *targetClipboard = m_wlClipboard->getClipboard(id);
+    if (!targetClipboard) {
+      return false;
+    }
+    return IClipboard::copy(targetClipboard, clipboard);
+  }
+
   // If using portal input capture, set clipboard there
   if (m_portalInputCapture) {
     IClipboard *targetClipboard = m_portalInputCapture->getClipboard(id);
@@ -510,6 +544,18 @@ bool EiComputer::setClipboard(ClipboardID id, const IClipboard *clipboard)
 
 void EiComputer::checkClipboards()
 {
+  // wl-clipboard polls for changes in the background, report them on leave.
+  // ClipboardGrabbed (not ClipboardChanged) so the client takes ownership too.
+  if (m_wlClipboard) {
+    if (m_wlClipboard->hasChanged()) {
+      for (ClipboardID id = 0; id < kClipboardEnd; ++id) {
+        sendClipboardEvent(EventTypes::ClipboardGrabbed, id);
+      }
+      m_wlClipboard->resetChanged();
+    }
+    return;
+  }
+
   // For portal-based input capture, clipboard changes come via portal events
   // For socket-based, clipboard is passive and changes are sent explicitly
   // Nothing to do here

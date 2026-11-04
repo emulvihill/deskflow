@@ -99,7 +99,7 @@ void PortalRemoteDesktop::handleSessionStarted(GObject *object, GAsyncResult *re
   }
 
 #ifdef HAVE_LIBPORTAL_CLIPBOARD
-  if (!xdp_session_is_clipboard_enabled(session)) {
+  if (!m_computer->usesWlClipboard() && !xdp_session_is_clipboard_enabled(session)) {
     if (Settings::value(Settings::Client::XdpClipboardRetried).toBool()) {
       // some backends never report clipboard enabled even when granted; don't loop forever
       LOG_DEBUG("clipboard still not enabled on remote desktop session after one retry, continuing without it");
@@ -177,11 +177,14 @@ void PortalRemoteDesktop::handleInitSession(GObject *object, GAsyncResult *res)
   m_sessionSignalId = g_signal_connect(G_OBJECT(session), "closed", G_CALLBACK(handleSessionClosedCallback), this);
 
 #ifdef HAVE_LIBPORTAL_CLIPBOARD
-  xdp_session_request_clipboard(session);
-  m_selectionTransferSignalId =
-      g_signal_connect(G_OBJECT(session), "selection-transfer", G_CALLBACK(selectionTransferCallback), this);
-  m_selectionOwnerChangedSignalId =
-      g_signal_connect(G_OBJECT(session), "selection-owner-changed", G_CALLBACK(selectionOwnerChangedCallback), this);
+  // with wl-clipboard in use the portal must not touch the clipboard
+  if (!m_computer->usesWlClipboard()) {
+    xdp_session_request_clipboard(session);
+    m_selectionTransferSignalId =
+        g_signal_connect(G_OBJECT(session), "selection-transfer", G_CALLBACK(selectionTransferCallback), this);
+    m_selectionOwnerChangedSignalId =
+        g_signal_connect(G_OBJECT(session), "selection-owner-changed", G_CALLBACK(selectionOwnerChangedCallback), this);
+  }
 #endif
 
   LOG_DEBUG("portal remote desktop session starting");

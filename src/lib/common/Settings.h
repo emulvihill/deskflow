@@ -58,6 +58,7 @@ public:
     inline static const auto Display = QStringLiteral("core/display");
     inline static const auto UseHooks = QStringLiteral("core/useHooks");
     inline static const auto Language = QStringLiteral("core/language");
+    inline static const auto UseWlClipboard = QStringLiteral("core/wlClipboard");
     inline static const auto EnableEnterCommand = QStringLiteral("core/enableEnterCommand");
     inline static const auto ComputerEnterCommand = QStringLiteral("core/enterCommand");
     inline static const auto EnableExitCommand = QStringLiteral("core/enableExitCommand");
@@ -293,6 +294,7 @@ private:
     , Core::ComputerName
     , Core::Display
     , Core::UseHooks
+    , Core::UseWlClipboard
     , Core::Language
     , Daemon::ConfigFile
     , Daemon::Elevate
@@ -368,6 +370,7 @@ private:
   // When checking the default values this list contains the ones that default to true.
   inline static const QStringList m_defaultTrueValues = {
       Core::UseHooks
+    , Core::UseWlClipboard
     , Gui::CloseToTray
     , Gui::CloseReminder
     , Gui::LogExpanded
