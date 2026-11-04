@@ -9,6 +9,7 @@
 #include "Hotkey.h"
 
 #include <QSettings>
+#include <QStringList>
 
 QString Hotkey::text() const
 {
@@ -74,12 +75,18 @@ QTextStream &operator<<(QTextStream &outStream, const Hotkey &hotkey)
   if (hotkey.actions().size() == 0)
     return outStream;
 
+  // The server reads "keystroke(k) = press actions; release actions",
+  // so actions marked active-on-release go after a single ';'.
+  QStringList onPress;
+  QStringList onRelease;
+  for (const auto &action : hotkey.actions()) {
+    (action.activeOnRelease() ? onRelease : onPress).append(action.text());
+  }
+
   QString outText = QStringLiteral("\t%1 = ").arg(hotkey.text());
-  for (int i = 0; i < hotkey.actions().size(); i++) {
-    outText.append(hotkey.actions().at(i).text());
-    if (i != hotkey.actions().size() - 1) {
-      outText.append(QStringLiteral(", "));
-    }
+  outText.append(onPress.join(QStringLiteral(", ")));
+  if (!onRelease.isEmpty()) {
+    outText.append(QStringLiteral("; ")).append(onRelease.join(QStringLiteral(", ")));
   }
   outText.append(QStringLiteral("\n"));
 

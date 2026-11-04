@@ -28,3 +28,10 @@ create_test(
   SOURCE KeySequenceTests.cpp
   WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/common"
 )
+
+create_test(
+  NAME HotkeyTests
+  DEPENDS common
+  SOURCE HotkeyTests.cpp
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/common"
+)
